@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>工厂批次用电量核算 · 交互演示</title>
+<style>
+  :root { --fg:#1c2430; --muted:#61708a; --line:#d9e1ec; --bg:#f6f8fb; --accent:#0b6bcb; --warn:#a15c00; --bad:#b3261e; --ok:#146c2e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; color:var(--fg); background:var(--bg); }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:16px 24px; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  main { max-width:1180px; margin:0 auto; padding:20px 24px 60px; display:grid; gap:18px; }
+  section { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px 18px; }
+  h2 { margin:0 0 10px; font-size:15px; display:flex; align-items:center; gap:8px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  label { font-size:13px; color:var(--muted); }
+  input[type=text], input[type=file] { border:1px solid var(--line); border-radius:6px; padding:6px 9px; font:inherit; background:#fff; }
+  button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .tag { font-size:12px; border-radius:999px; padding:1px 9px; border:1px solid currentColor; }
+  .tag.ok { color:var(--ok); } .tag.warn { color:var(--warn); } .tag.bad { color:var(--bad); }
+  pre { background:#0f1724; color:#d9e4f2; padding:12px; border-radius:6px; overflow:auto; max-height:340px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  .muted { color:var(--muted); }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:13px; }
+  .kv b { color:var(--muted); font-weight:600; }
+  .banner { border-radius:6px; padding:9px 12px; margin-bottom:10px; font-size:13px; display:none; }
+  .banner.show { display:block; }
+  .banner.stale { background:#fff4e5; color:var(--warn); border:1px solid #f0d3a8; }
+  .banner.error { background:#fdecea; color:var(--bad); border:1px solid #f3c2bd; }
+  .pill { font-size:12px; color:var(--muted); }
+  code { background:#eef3fa; padding:1px 5px; border-radius:4px; font-size:12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>工厂批次用电量核算 · 交互演示</h1>
+  <p>上传示数 / 批次 CSV，触发后台重算，查询批次用电量、所用示数与进度。OpenAPI 文档：<a href="/docs">/docs</a></p>
+</header>
+<main>
+  <section>
+    <h2>① 上传累计示数 CSV <span class="pill">列：meter_id, ts_utc, value_wh（UTC 整秒，累计整数 Wh）</span></h2>
+    <div class="row">
+      <input type="file" id="readings-file" accept=".csv,text/csv">
+      <button id="readings-btn">上传示数</button>
+    </div>
+    <div class="banner" id="readings-msg"></div>
+  </section>
+
+  <section>
+    <h2>② 上传生产批次 CSV <span class="pill">列：batch_no, meter_id, start_utc, end_utc</span></h2>
+    <div class="row">
+      <input type="file" id="batches-file" accept=".csv,text/csv">
+      <button id="batches-btn">上传批次</button>
+    </div>
+    <div class="banner" id="batches-msg"></div>
+  </section>
+
+  <section>
+    <h2>③ 重算进度 <button class="secondary" id="progress-btn" style="margin-left:auto">刷新</button></h2>
+    <div class="kv" id="progress-kv"><span class="muted">点击“刷新”加载。</span></div>
+    <pre id="progress-json"></pre>
+  </section>
+
+  <section>
+    <h2>④ 查询电表结果 <span class="pill">整套快照；重算期间会标注“待更新”</span></h2>
+    <div class="row">
+      <label>电表号</label><input type="text" id="meter-id" placeholder="M-001">
+      <button id="meter-btn">查询</button>
+    </div>
+    <div class="banner" id="meter-msg"></div>
+    <table id="meter-table"><thead><tr>
+      <th>批次号</th><th>状态</th><th>用电量 Wh</th><th>起始读数</th><th>结束读数</th><th>所用示数</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>⑤ 查询单批次 <span class="pill">含插值所用的包围示数、快照版本</span></h2>
+    <div class="row">
+      <label>批次号</label><input type="text" id="batch-no" placeholder="B-2026-001">
+      <button id="batch-btn">查询</button>
+    </div>
+    <pre id="batch-json"></pre>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const api = (path, opts) => fetch(path, opts).then(async r => {
+  const body = await r.json().catch(() => ({message: r.statusText}));
+  if (!r.ok) throw Object.assign(new Error(body.message || r.statusText), {body});
+  return body;
+});
+function showBanner(id, kind, text) {
+  const el = $(id);
+  el.className = 'banner show ' + kind;
+  el.textContent = text;
+}
+async function upload(kind, fileInput, btn, msgId) {
+  const file = $(fileInput).files[0];
+  if (!file) { showBanner(msgId, 'error', '请先选择 CSV 文件'); return; }
+  $(btn).disabled = true;
+  try {
+    const form = new FormData(); form.append('file', file);
+    const res = await api('/api/v1/uploads/' + kind, {method: 'POST', body: form});
+    showBanner(msgId, '', `已受理上传 #${res.upload_id}，任务 #${res.job_id} 已排队；受影响电表：${res.affected_meters.join(', ') || '无'}`);
+    await refreshProgress();
+    if (res.affected_meters.length) { $('meter-id').value = res.affected_meters[0]; }
+  } catch (err) {
+    const d = err.body || {};
+    showBanner(msgId, 'error', `${d.code || 'error'}: ${d.message || err.message}` + (d.details ? '\n' + JSON.stringify(d.details, null, 2) : ''));
+  } finally {
+    $(btn).disabled = false;
+  }
+}
+$('readings-btn').onclick = () => upload('readings', 'readings-file', 'readings-btn', 'readings-msg');
+$('batches-btn').onclick = () => upload('batches', 'batches-file', 'batches-btn', 'batches-msg');
+
+async function refreshProgress() {
+  const p = await api('/api/v1/progress');
+  const q = p.queue;
+  const counts = Object.entries(q.job_counts).map(([k, v]) => `${k}: ${v}`).join(' · ') || '无任务';
+  $('progress-kv').innerHTML = `
+    <b>状态</b><span class="tag ${q.idle ? 'ok' : 'warn'}">${q.idle ? '空闲（结果均为最新）' : '重算中'}</span>
+    <b>任务统计</b><span>${counts}</span>
+    <b>待更新电表</b><span>${q.pending_meters.length ? q.pending_meters.map(m => m.meter_id).join(', ') : '无'}</span>
+    <b>Worker</b><span>${p.worker.running ? '运行中' : '已停止'}，最近发布 ${p.worker.published} 次，当前任务 #${p.worker.current_job_id ?? '—'}</span>`;
+  $('progress-json').textContent = JSON.stringify(p, null, 2);
+}
+
+$('progress-btn').onclick = refreshProgress;
+
+$('meter-btn').onclick = async () => {
+  const meter = $('meter-id').value.trim();
+  if (!meter) return;
+  const data = await api('/api/v1/meters/' + encodeURIComponent(meter) + '/results');
+  const msg = $('meter-msg');
+  if (data.result_pending_update) {
+    showBanner('meter-msg', 'stale', `结果待更新：任务 #${data.pending_job_id} 正在重算。下表为上一整套已发布结果（版本 ${data.version}），仍可完整使用。`);
+  } else {
+    msg.className = 'banner show';
+    msg.textContent = data.message;
+  }
+  const tbody = $('meter-table').querySelector('tbody');
+  tbody.innerHTML = '';
+  const defs = new Map(data.batch_definitions.map(d => [d.batch_no, d]));
+  for (const no of new Set([...data.results.map(r => r.batch_no), ...defs.keys()])) {
+    const r = data.results.find(x => x.batch_no === no);
+    const tr = document.createElement('tr');
+    if (!r) {
+      tr.innerHTML = `<td><code>${no}</code></td><td><span class="tag warn">尚未发布</span></td><td colspan="4" class="muted">重算排队中</td>`;
+    } else {
+      const refs = ['start', 'end'].map(ep => {
+        const list = (r.used_readings[ep] || []).map(x => `${x.role === 'exact' ? '=' : ''}${x.value_wh}@${x.time}`).join(' → ');
+        return list || '—';
+      });
+      tr.innerHTML = `
+        <td><code>${no}</code></td>
+        <td>${r.status === 'ok' ? '<span class="tag ok">ok</span>' : `<span class="tag warn">待补数</span><div class="muted">${r.note || ''}</div>`}</td>
+        <td>${r.energy_wh ?? '—'}${r.result_pending_update ? ' <span class="tag warn">待更新</span>' : ''}</td>
+        <td>${r.start_value_wh ?? '—'}</td><td>${r.end_value_wh ?? '—'}</td>
+        <td class="muted">${refs.join('<br>')}</td>`;
+    }
+    tbody.appendChild(tr);
+  }
+};
+
+$('batch-btn').onclick = async () => {
+  const no = $('batch-no').value.trim();
+  if (!no) return;
+  try {
+    const data = await api('/api/v1/batches/' + encodeURIComponent(no));
+    $('batch-json').textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    $('batch-json').textContent = JSON.stringify(err.body || {message: err.message}, null, 2);
+  }
+};
+
+refreshProgress().catch(() => {});
+</script>
+</body>
+</html>
